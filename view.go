@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -14,7 +15,8 @@ var (
 	// Matches PM2 log lines: "7|service     | content"
 	logLineRe = regexp.MustCompile(`^\d+\|([^|]+?)\s*\| (.*)$`)
 	// ISO 8601 timestamp at the start of content, e.g. 2026-03-01T01:10:00.076Z
-	logTsRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?`)
+	// Also matches timezone offsets like +0100.
+	logTsRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{4})?`)
 	// Strips ANSI escape codes for plain-text matching.
 	ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 )
@@ -33,11 +35,21 @@ func filterLines(content, query string) string {
 	return strings.Join(out, "\n")
 }
 
+// parsedLog holds a parsed log line with its timestamp for sorting.
+type parsedLog struct {
+	ts      string // raw ISO 8601 timestamp (lexicographically sortable)
+	order   int    // original position, for stable sort of lines without timestamps
+	content string // content after timestamp
+	name    string // service name
+	stderr  bool
+}
+
 func processLogs(raw string, showService, showTS, showStderr bool) string {
 	lines := strings.Split(raw, "\n")
-	out := make([]string, 0, len(lines))
+	parsed := make([]parsedLog, 0, len(lines))
 	isStderr := false
 	isSkip := true // skip until we're inside a known service log section
+	order := 0
 
 	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
@@ -70,20 +82,50 @@ func processLogs(raw string, showService, showTS, showStderr bool) string {
 		name := match[1]
 		content := match[2]
 
+		// Strip ANSI before timestamp extraction so colour codes don't interfere.
+		plain := stripANSI(content)
 		var ts string
-		if loc := logTsRe.FindStringIndex(content); loc != nil {
-			ts = content[:loc[1]]
+		if loc := logTsRe.FindStringIndex(plain); loc != nil {
+			ts = plain[:loc[1]]
 			content = strings.TrimLeft(content[loc[1]:], "\t ")
 		}
 
+		// Continuation line (no timestamp) — append to the previous entry
+		// so multi-line log messages stay together.
+		if ts == "" && len(parsed) > 0 {
+			parsed[len(parsed)-1].content += "\n" + content
+			continue
+		}
+
+		parsed = append(parsed, parsedLog{
+			ts:      ts,
+			order:   order,
+			content: content,
+			name:    name,
+			stderr:  isStderr,
+		})
+		order++
+	}
+
+	// Sort by timestamp so stdout and stderr are interleaved chronologically.
+	// Lines with identical (or empty) timestamps keep their original order.
+	sort.SliceStable(parsed, func(i, j int) bool {
+		if parsed[i].ts == parsed[j].ts {
+			return parsed[i].order < parsed[j].order
+		}
+		return parsed[i].ts < parsed[j].ts
+	})
+
+	out := make([]string, 0, len(parsed))
+	for _, p := range parsed {
 		var prefix string
 		if showService {
-			prefix = lipgloss.NewStyle().Foreground(serviceColour(name)).Render(name) + " "
+			prefix = lipgloss.NewStyle().Foreground(serviceColour(p.name)).Render(p.name) + " "
 		}
-		if showTS && ts != "" {
-			prefix += sDim.Render(ts) + " "
+		if showTS && p.ts != "" {
+			prefix += sDim.Render(p.ts) + " "
 		}
-		out = append(out, prefix+content)
+		out = append(out, prefix+p.content)
 	}
 	return strings.Join(out, "\n")
 }

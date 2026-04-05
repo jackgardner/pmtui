@@ -487,6 +487,12 @@ func (m *model) handleSplitKey(msg tea.KeyMsg) tea.Cmd {
 		m.showStderr = !m.showStderr
 		m.applyLogs()
 		m.applySplitLogs()
+		if m.autoScroll {
+			m.vp.GotoBottom()
+		}
+		if m.autoScroll2 {
+			m.vp2.GotoBottom()
+		}
 
 	default:
 		if m.splitPane == 0 {
@@ -595,6 +601,9 @@ func (m *model) handleListKey(msg tea.KeyMsg) tea.Cmd {
 	case "e":
 		m.showStderr = !m.showStderr
 		m.applyLogs()
+		if m.autoScroll {
+			m.vp.GotoBottom()
+		}
 
 	case "?":
 		m.debug = !m.debug
@@ -650,6 +659,9 @@ func (m *model) handleLogsKey(msg tea.KeyMsg) tea.Cmd {
 	case "e":
 		m.showStderr = !m.showStderr
 		m.applyLogs()
+		if m.autoScroll {
+			m.vp.GotoBottom()
+		}
 
 	default:
 		var cmd tea.Cmd
