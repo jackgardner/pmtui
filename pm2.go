@@ -186,9 +186,16 @@ func subtreeDescendants(pid int, children map[int][]int) []int {
 
 // enrichWithPS updates CPU and memory on each process using a live ps snapshot,
 // summing stats across the entire process subtree (make → bash → node, etc.).
+// It also pre-computes the health check port for each process to avoid
+// redundant ps calls later, using a cache keyed by PID.
 func enrichWithPS(procs []PM2Process) {
 	rows, children := psSnapshot()
+
+	// Track live PIDs so we can prune the cache below.
+	livePIDs := make(map[int]bool, len(procs))
+
 	for i, p := range procs {
+		livePIDs[p.PID] = true
 		var cpu float64
 		var rss int64
 		for _, pid := range append([]int{p.PID}, subtreeDescendants(p.PID, children)...) {
@@ -199,8 +206,30 @@ func enrichWithPS(procs []PM2Process) {
 		}
 		procs[i].Monit.CPU = cpu
 		procs[i].Monit.Memory = rss * 1024 // KB → bytes
+		if p.PM2Env.Status == "online" {
+			if cached, ok := hcPortCache[p.PID]; ok {
+				procs[i].HCPort = cached
+			} else {
+				port := findHCPort(p.PID, children)
+				if port != "" {
+					hcPortCache[p.PID] = port
+				}
+				procs[i].HCPort = port
+			}
+		}
+	}
+
+	// Prune cache entries for PIDs that no longer exist.
+	for pid := range hcPortCache {
+		if !livePIDs[pid] {
+			delete(hcPortCache, pid)
+		}
 	}
 }
+
+// hcPortCache caches the health check port for a given PID. Ports don't
+// change for running processes, so we only need to look them up once.
+var hcPortCache = map[int]string{}
 
 // portFromEnv reads PORT from the environment of a running process using
 // `ps eww -p <pid>`, which shows the full environment string. Returns "" if
@@ -219,10 +248,9 @@ func portFromEnv(pid int) string {
 }
 
 // findHCPort walks the process subtree rooted at pid looking for a PORT env
-// var. Returns "PORT+200" per the convention (gRPC=PORT, HTTP=PORT+100,
-// health=PORT+200), or "" if no PORT is found.
-func findHCPort(pid int) string {
-	_, children := psSnapshot()
+// var using a pre-built children map. Returns "PORT+200" per the convention
+// (gRPC=PORT, HTTP=PORT+100, health=PORT+200), or "" if no PORT is found.
+func findHCPort(pid int, children map[int][]int) string {
 	for _, p := range append([]int{pid}, subtreeDescendants(pid, children)...) {
 		if port := portFromEnv(p); port != "" {
 			n, err := strconv.Atoi(port)
@@ -285,7 +313,7 @@ func pm2HealthCheck(p PM2Process) (bool, string, string) {
 	if p.PM2Env.Status != "online" {
 		return false, "", ""
 	}
-	hcPort := findHCPort(p.PID)
+	hcPort := p.HCPort // pre-computed by enrichWithPS
 	if hcPort == "" {
 		return true, "", "no PORT in env"
 	}

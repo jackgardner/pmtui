@@ -207,7 +207,7 @@ func cmdAction(verb, name string, fn func(string) error) tea.Cmd {
 }
 
 func cmdTick() tea.Cmd {
-	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
@@ -243,22 +243,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 
 		type healthState struct {
-			ok, known bool
-			hcPort    string
-			hcDebug   string
+			pid         int
+			ok, known   bool
+			hcDebug     string
 		}
 		saved := make(map[string]healthState)
 		for _, p := range m.procs {
-			saved[p.Name] = healthState{p.Healthy, p.HealthKnown, p.HCPort, p.HCDebug}
+			saved[p.Name] = healthState{p.PID, p.Healthy, p.HealthKnown, p.HCDebug}
 		}
 		m.procs = msg.procs
 		for i, p := range m.procs {
-			if s, ok := saved[p.Name]; ok {
+			if s, ok := saved[p.Name]; ok && s.pid == p.PID {
+				// Same PID — preserve cached health state.
 				m.procs[i].Healthy = s.ok
 				m.procs[i].HealthKnown = s.known
-				m.procs[i].HCPort = s.hcPort
 				m.procs[i].HCDebug = s.hcDebug
 			}
+			// If PID changed (restart), HealthKnown stays false → re-checked below.
 		}
 		if m.selIdx >= len(m.procs) && len(m.procs) > 0 {
 			m.selIdx = len(m.procs) - 1
@@ -268,7 +269,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		for i, p := range m.procs {
-			cmds = append(cmds, cmdHealth(i, p))
+			if !p.HealthKnown {
+				cmds = append(cmds, cmdHealth(i, p))
+			}
 		}
 
 		if len(m.procs) > 0 {
